@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
-using System.Management;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Newtonsoft.Json;
 
@@ -13,6 +15,9 @@ namespace NetworkSpecificDNS;
 public static class Program
 {
     private const string DefaultConfigPath = "config.json";
+
+    private static readonly Regex NameRegex = new Regex(@"^\s*Name\s*: (.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex BssidRegex = new Regex(@"^\s*BSSID\s*: (.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     /// <summary>
     /// Program entry point.
@@ -59,35 +64,102 @@ public static class Program
     {
         while (true)
         {
-            //try
+            try
             {
-                RunCheck(config);
+                RunCheck(config, new Dictionary<string, string>());
             }
-            //catch (Exception ex)
+            catch (Exception ex)
             {
-                //Console.Error.WriteLine(ex);
+                Console.Error.WriteLine(ex);
             }
 
             Thread.Sleep(config.Interval);
         }
     }
 
-    private static void RunCheck(Config config)
+    private static void RunCheck(Config config, Dictionary<string, string> prevBssids)
     {
-        string query = "SELECT * FROM MSNDis_80211_BSSIList";
-        ManagementObjectSearcher searcher = new ManagementObjectSearcher("root/WMI", query);
-        ManagementObjectCollection moc = searcher.Get();
-        ManagementObjectCollection.ManagementObjectEnumerator moe = moc.GetEnumerator();
-        moe.MoveNext();
-        ManagementBaseObject[] objarr = (ManagementBaseObject[])moe.Current.Properties["Ndis80211BSSIList"].Value;
-        foreach (ManagementBaseObject obj in objarr)
+        foreach ((string adapter, string bssid) in GetCurrentBSSIDs())
         {
-            uint u_rssi = (uint)obj["Ndis80211Rssi"];
-            int rssi = (int)u_rssi;
-            uint u_ssid = (uint)obj["Ndis80211Ssid"];
-            int ssid = (int)u_ssid;
-            Console.WriteLine("RSSI: " + rssi + " SSID: " + ssid);
-            // .... then get other properties such as "Ndis80211MacAddress" and "Ndis80211Ssid"
+            if (prevBssids.TryGetValue(adapter, out string prevBssid) && prevBssid == bssid)
+            {
+                continue;
+            }
+
+            prevBssids[adapter] = bssid;
+
+            if (!config.Settings.TryGetValue(adapter, out IDictionary<string, IList<string>> adapterSettings))
+            {
+                continue;
+            }
+
+            IList<string> dnsList;
+            if (!adapterSettings.TryGetValue(bssid, out dnsList))
+            {
+                if (!adapterSettings.TryGetValue("default", out dnsList))
+                {
+                    dnsList = new List<string>();
+                }
+            }
+
+            if (dnsList.Count == 0)
+            {
+                RunNetSH($"interface ipv4 set dns name=\"{adapter}\" source=dhcp");
+            }
+            else
+            {
+                RunNetSH($"interface ipv4 delete dnsserver name=\"{adapter}\" all");
+                for (int i = 0; i < dnsList.Count; i++)
+                {
+                    RunNetSH($"interface ipv4 add dnsserver name=\"{adapter}\" address={dnsList[i]} index={i + 1}");
+                }
+            }
+        }
+    }
+
+    private static string RunNetSH(string argumentLine)
+    {
+        using Process process = new Process
+        {
+            StartInfo =
+            {
+                FileName = "netsh.exe",
+                Arguments = argumentLine,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            },
+        };
+        process.Start();
+
+        string output = process.StandardOutput.ReadToEnd();
+        return output;
+    }
+
+    private static IEnumerable<(string Adapter, string Network)> GetCurrentBSSIDs()
+    {
+        string output = RunNetSH("wlan show interfaces");
+        string[] lines = output.Split('\n', '\r');
+
+        string? curAdapter = null;
+
+        foreach (string line in lines)
+        {
+            Match nameMatch = NameRegex.Match(line);
+            if (nameMatch.Success)
+            {
+                curAdapter = nameMatch.Groups[1].Value;
+            }
+            else if (curAdapter is not null)
+            {
+                Match bssidMatch = BssidRegex.Match(line);
+                if (bssidMatch.Success)
+                {
+                    string bssid = bssidMatch.Groups[1].Value;
+                    yield return (curAdapter, bssid);
+                    curAdapter = null;
+                }
+            }
         }
     }
 }

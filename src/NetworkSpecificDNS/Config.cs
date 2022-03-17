@@ -17,5 +17,5 @@ public class Config
     /// <summary>
     /// Gets or sets the settings.
     /// </summary>
-    public IDictionary<string, IList<string>> Settings { get; set; } = new Dictionary<string, IList<string>>();
+    public IDictionary<string, IDictionary<string, IList<string>>> Settings { get; set; } = new Dictionary<string, IDictionary<string, IList<string>>>();
 }
