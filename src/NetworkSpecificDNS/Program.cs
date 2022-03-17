@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Newtonsoft.Json;
@@ -30,19 +31,37 @@ public static class Program
             throw new ArgumentNullException(nameof(args));
         }
 
-        if (args.Length > 1)
+        if (!CheckIfAdministrator())
         {
-            Console.Error.WriteLine("Too many arguments provided. Please provide only a single path to a settings file.");
+            Console.Error.WriteLine("Application requires to be executed as administrator.");
             Environment.Exit(11);
         }
 
+        if (args.Length > 1)
+        {
+            Console.Error.WriteLine("Too many arguments provided. Please provide only a single path to a settings file.");
+            Environment.Exit(12);
+        }
+
         string path = args.Length == 0 ? DefaultConfigPath : args[0];
+        RunCheckLoop(path);
+    }
+
+    private static bool CheckIfAdministrator()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new WindowsPrincipal(identity);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static Config? LoadConfig(string path)
+    {
         string fullPath = Path.GetFullPath(path);
 
         if (!File.Exists(path))
         {
-            Console.Error.WriteLine($"Couldn't find config ile '{fullPath}'.");
-            Environment.Exit(12);
+            Console.Error.WriteLine($"Couldn't find config file '{fullPath}'.");
+            return null;
         }
 
         string content = File.ReadAllText(fullPath);
@@ -51,29 +70,35 @@ public static class Program
         if (config is null)
         {
             Console.Error.WriteLine($"Malformed config file '{fullPath}'.");
-            Environment.Exit(13);
         }
-        else
-        {
-            RunCheckLoop(config);
-        }
+
+        return config;
     }
 
     [SuppressMessage("Design", "CA1031", Justification = "Wanted behaviour is catching all exceptions.")]
-    private static void RunCheckLoop(Config config)
+    private static void RunCheckLoop(string configPath)
     {
+        Config? lastValidConfig = null;
         while (true)
         {
             try
             {
-                RunCheck(config, new Dictionary<string, string>());
+                Config? config = LoadConfig(configPath);
+
+                if (config is not null)
+                {
+                    lastValidConfig = config;
+                    RunCheck(config, new Dictionary<string, string>());
+                }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine(ex);
             }
 
-            Thread.Sleep(config.Interval);
+            int sleepTime = lastValidConfig is null ? 5000 : lastValidConfig.Interval;
+            Console.WriteLine($"Sleeping for {sleepTime} ms.");
+            Thread.Sleep(sleepTime);
         }
     }
 
@@ -104,10 +129,12 @@ public static class Program
 
             if (dnsList.Count == 0)
             {
+                Console.WriteLine($"Setting DNS to DHCP for adapter '{adapter}'.");
                 RunNetSH($"interface ipv4 set dns name=\"{adapter}\" source=dhcp");
             }
             else
             {
+                Console.WriteLine($"Setting DNS to [{string.Join(", ", dnsList)}] for adapter '{adapter}'.");
                 RunNetSH($"interface ipv4 delete dnsserver name=\"{adapter}\" all");
                 for (int i = 0; i < dnsList.Count; i++)
                 {
